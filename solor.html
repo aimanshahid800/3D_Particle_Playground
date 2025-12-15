@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gesture-Controlled 3D Particle Playground</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@3.8.0/dist/tf-core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@3.8.0/dist/tf-backend-webgl.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469247/hands.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.0/dist/hand-pose-detection.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; }
+
+        /* Minimal UI for Templates (Left Bottom Corner) */
+        #template-selector {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            display: flex;
+            gap: 10px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(5px);
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            z-index: 1000;
+        }
+        .template-button {
+            width: 50px;
+            height: 50px;
+            border-radius: 8px;
+            border: none;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .template-button:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .template-button.active {
+            background: #007bff;
+            box-shadow: 0 0 10px #007bff;
+            transform: scale(1.05);
+        }
+
+        /* README & Status Overlay */
+        #info-overlay {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px;
+            max-width: 300px;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(5px);
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 14px;
+            z-index: 1000;
+        }
+        #info-overlay h3 { margin-top: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.2); padding-bottom: 5px; }
+        #camera-status { color: yellow; font-weight: bold; margin-top: 10px; }
+        
+        /* Video stream (hidden, used for hand tracking) */
+        #video-stream {
+            position: absolute; /* Keep it in the DOM but hidden */
+            top: -1000px;
+            left: -1000px;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+        }
+    </style>
+</head>
+<body>
+    <video id="video-stream" autoplay playsinline></video>
+    <div id="template-selector">
+        <button class="template-button" data-template="heart" title="Hearts">❤️</button>
+        <button class="template-button" data-template="flower" title="Flowers">🌸</button>
+        <button class="template-button" data-template="saturn" title="Saturn">🪐</button>
+        <button class="template-button" data-template="fireworks" title="Fireworks">💥</button>
+    </div>
+    <div id="info-overlay">
+        <h3>✨ Particle Playground (Gesture Control)</h3>
+        <p><strong>Gestures:</strong></p>
+        <ul>
+            <li>**Tension (Fist vs. Open):** Controls particle **Spread/Expansion**.</li>
+            <li>**Hands Closer/Further:** Controls **Global Scale** (subtle).</li>
+            <li>**Hands L/R:** Controls **Spin** / Y-Axis rotation.</li>
+            <li>**Quick Snap:** Triggers **Fireworks** burst.</li>
+        </ul>
+        <p><strong>Fallback (No Camera):</strong></p>
+        <ul>
+            <li>**dat.GUI Panel:** Use sliders to control parameters.</li>
+            <li>**Mouse/Touch:** Drag to rotate the scene.</li>
+        </ul>
+        <div id="camera-status">Initializing Camera...</div>
+    </div>
+
+    <script id="vertexShader" type="x-shader/x-vertex">
+        uniform float uTime;
+        uniform float uSize;
+        uniform float uScale;
+
+        attribute float aRandom;
+        attribute float aTemplateProgress;
+        attribute vec3 aTemplateTarget;
+
+        varying vec3 vColor;
+        varying float vAlpha;
+        varying float vRandom;
+        
+        // Per-particle noise for organic motion
+        // Simple procedural noise function
+        float random (in vec2 st) {
+            return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+        }
+
+        void main() {
+            vRandom = aRandom;
+            vAlpha = aTemplateProgress;
+
+            // Apply global scale and local size
+            float size = uSize * (2.0 + 1.0 * aRandom);
+            gl_PointSize = size * uScale * (1.0 + 0.5 * sin(uTime * 0.1 * aRandom));
+            
+            // Current position
+            vec3 currentPosition = position;
+
+            // Subtle physics: noise/organic motion
+            float noiseX = random(position.xz * 0.1 + uTime * 0.05) * 2.0 - 1.0;
+            float noiseY = random(position.xy * 0.1 + uTime * 0.05) * 2.0 - 1.0;
+            float noiseZ = random(position.yz * 0.1 + uTime * 0.05) * 2.0 - 1.0;
+            
+            // Interpolate towards the template target position
+            // aTemplateProgress is 1.0 for the current template, 0.0 for others
+            vec3 finalPosition = mix(currentPosition, aTemplateTarget * uScale * 5.0, aTemplateProgress * 0.5);
+
+            // Apply gentle noise for "breathing" effect
+            finalPosition.x += noiseX * 0.5;
+            finalPosition.y += noiseY * 0.5;
+            finalPosition.z += noiseZ * 0.5;
+
+            // Project the final position
+            vec4 mvPosition = modelViewMatrix * vec4( finalPosition, 1.0 );
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        uniform vec3 uColor;
+        uniform sampler2D uTexture;
+        
+        varying vec3 vColor;
+        varying float vAlpha;
+        varying float vRandom;
+
+        void main() {
+            // Circle texture with soft edges (or custom shape from uTexture)
+            vec4 texColor = texture2D(uTexture, gl_PointCoord);
+            
+            // Color based on uniform color and random per-particle shift
+            vec3 finalColor = uColor * (0.8 + 0.4 * vRandom);
+
+            // Calculate final alpha based on texture and distance from center (soft edge)
+            float alpha = texColor.a * (1.0 - length(gl_PointCoord - 0.5) * 0.8) * vAlpha;
+
+            gl_FragColor = vec4(finalColor, alpha);
+
+            // Discard fully transparent pixels
+            if (gl_FragColor.a < 0.01) discard;
+        }
+    </script>
+
+    <script>
+        // --- CORE CONFIGURATION & STATE ---
+        const CONFIG = {
+            particleCount: 20000,
+            particleSize: 10,
+            particleColor: 0x0077ff,
+            globalScale: 1.0,
+            spread: 1.0, // Controls how much the template is scaled (gesture input)
+            rotationY: 0.0,
+            currentTemplate: 'heart',
+            fireworksActive: false,
+            gestureSensitivity: 0.05, // How fast the particle system reacts
+        };
+
+        let scene, camera, renderer;
+        let particles, geometry, material, uniforms;
+        let clock = new THREE.Clock();
+
+        // Hand Tracking Variables
+        let detector, video;
+        let lastHandDistance = 0;
+        let lastHandTension = 0;
+        let lastUpdateTime = performance.now();
+        const HAND_MODEL_CONFIG = {
+            runtime: 'mediapipe', // or 'tfjs'
+            modelType: 'full', // 'lite' or 'full'
+            solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469247',
+        };
+
+        // Templates (Template functions generate an array of positions)
+        const templates = {
+            // Heart shape using polar coordinates and a cardioid formula
+            heart: (i, count) => {
+                const angle = i / count * Math.PI * 2;
+                const r = 1 - Math.sin(angle);
+                const x = 16 * Math.pow(Math.sin(angle), 3);
+                const y = 13 * Math.cos(angle) - 5 * Math.cos(2 * angle) - 2 * Math.cos(3 * angle) - Math.cos(4 * angle);
+                const z = 0;
+                return new THREE.Vector3(x * 0.1, y * 0.1, z);
+            },
+            // Sphere/Flower (Fibonacci Sphere for even distribution)
+            flower: (i, count) => {
+                const offset = 2 / count;
+                const index = i;
+                const y = (index * offset) - 1 + (offset / 2);
+                const r = Math.sqrt(1 - Math.pow(y, 2));
+                const phi = ((index + 1) % count) * Math.PI * 2 / 1.6180339887; // Golden ratio angle
+                const x = Math.cos(phi) * r;
+                const z = Math.sin(phi) * r;
+                return new THREE.Vector3(x, y, z).multiplyScalar(2.5);
+            },
+            // Saturn (Ring and central sphere)
+            saturn: (i, count) => {
+                if (i < count * 0.7) { // Ring particles
+                    const angle = i / (count * 0.7) * Math.PI * 2;
+                    const r = 2.0 + Math.random() * 0.5;
+                    const x = Math.cos(angle) * r;
+                    const y = (Math.random() - 0.5) * 0.1; // Thin plane
+                    const z = Math.sin(angle) * r;
+                    return new THREE.Vector3(x, y, z);
+                } else { // Sphere particles
+                    const offset = 2 / (count * 0.3);
+                    const index = i - count * 0.7;
+                    const y = (index * offset) - 1 + (offset / 2);
+                    const r = Math.sqrt(1 - Math.pow(y, 2));
+                    const phi = ((index + 1) % count) * Math.PI * 2 / 1.6180339887;
+                    const x = Math.cos(phi) * r * 0.8;
+                    const z = Math.sin(phi) * r * 0.8;
+                    return new THREE.Vector3(x, y, z);
+                }
+            },
+            // Fireworks (Initial position is center)
+            fireworks: (i, count) => {
+                return new THREE.Vector3(0, 0, 0); // Start at the origin
+            }
+        };
+
+        // --- HAND TRACKING & GESTURE LOGIC ---
+
+        async function setupHandTracking() {
+            try {
+                // Initialize video stream
+                video = document.getElementById('video-stream');
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => resolve();
+                });
+                video.play();
+                document.getElementById('camera-status').textContent = 'Camera Status: Running.';
+                
+                // Initialize Handpose detector
+                detector = await handPoseDetection.createDetector(handPoseDetection.SupportedModels.MediaPipeHands, HAND_MODEL_CONFIG);
+                
+                // Start tracking loop
+                trackHands();
+            } catch (error) {
+                console.error('Could not access camera or initialize Handpose:', error);
+                document.getElementById('camera-status').innerHTML = 'Camera Status: <span style="color:red;">Permission Denied or Error.</span>';
+            }
+        }
+        
+        // Helper to calculate Euclidean distance between two 3D points
+        function distance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
+        }
+
+        function getGestureInput(hands) {
+            if (hands.length === 0) return null;
+
+            let handDistance = 0;
+            let handTension = 0; // Represents overall openness/spread of fingers
+
+            // 1. Hand Tension/Spread (using keypoint distances on the first hand)
+            if (hands.length >= 1) {
+                const hand = hands[0].keypoints3D;
+                // Calculate average distance between thumb tip and other finger tips
+                const thumbTip = hand[4];
+                const indexTip = hand[8];
+                const middleTip = hand[12];
+                const ringTip = hand[16];
+                const pinkyTip = hand[20];
+                
+                // The distances are normalized, so we can use them directly
+                handTension = (distance(thumbTip, indexTip) + distance(thumbTip, middleTip) + distance(thumbTip, ringTip) + distance(thumbTip, pinkyTip)) / 4;
+            }
+
+            // 2. Hand Distance (between two hands) and X/Y position
+            let centerX = 0;
+            if (hands.length === 2) {
+                const wrist1 = hands[0].keypoints3D[0];
+                const wrist2 = hands[1].keypoints3D[0];
+                
+                handDistance = distance(wrist1, wrist2);
+                centerX = (wrist1.x + wrist2.x) / 2; // X-axis center of the hands
+            } else if (hands.length === 1) {
+                // Use wrist position relative to the center of the video feed
+                const wrist = hands[0].keypoints3D[0];
+                handDistance = 1.0; // Fixed distance for single hand
+                centerX = wrist.x;
+            }
+            
+            return { handDistance, handTension, centerX };
+        }
+        
+        async function trackHands() {
+            if (!detector || !video.readyState) {
+                requestAnimationFrame(trackHands);
+                return;
+            }
+
+            const hands = await detector.estimateHands(video, { flipHorizontal: true });
+            
+            const gesture = getGestureInput(hands);
+
+            if (gesture) {
+                const currentTime = performance.now();
+                const deltaTime = (currentTime - lastUpdateTime) / 1000; // in seconds
+                lastUpdateTime = currentTime;
+                
+                // --- Apply Gesture Logic ---
+                
+                // 1. Spread/Expansion (Tension)
+                // Map tension (0-1 range) to particle spread
+                const newSpread = THREE.MathUtils.lerp(CONFIG.spread, 1.0 + gesture.handTension * 3.0, CONFIG.gestureSensitivity * 3.0);
+                CONFIG.spread = newSpread;
+                
+                // 2. Global Scale (Distance)
+                // Normalize and clamp distance. Smaller distance = smaller scale
+                const normalizedDistance = Math.min(1.0, Math.max(0.2, gesture.handDistance * 2.0));
+                const newScale = THREE.MathUtils.lerp(CONFIG.globalScale, 0.5 + normalizedDistance * 1.5, CONFIG.gestureSensitivity);
+                CONFIG.globalScale = newScale;
+                
+                // 3. Rotation (Horizontal X-Position)
+                // Map X-position to Y-axis rotation speed. X ranges from roughly -0.5 to 0.5 (normalized)
+                const rotationFactor = THREE.MathUtils.mapLinear(gesture.centerX, -0.5, 0.5, -0.05, 0.05);
+                CONFIG.rotationY += rotationFactor;
+                
+                // 4. Fireworks Snap Detection (Quick closing motion)
+                if (CONFIG.currentTemplate !== 'fireworks' && hands.length === 2) {
+                     const distanceChange = lastHandDistance - gesture.handDistance;
+                     const tensionChange = lastHandTension - gesture.handTension;
+                     
+                     // Snap: A quick and significant decrease in both distance and tension
+                     if (distanceChange > 0.5 && tensionChange > 0.2 && deltaTime < 0.2) {
+                         setTemplate('fireworks');
+                         CONFIG.fireworksActive = true;
+                         // The fireworks effect will be handled in the main render loop
+                     }
+                }
+                
+                // Update last values for snap detection
+                lastHandDistance = gesture.handDistance;
+                lastHandTension = gesture.handTension;
+            }
+
+            requestAnimationFrame(trackHands);
+        }
+
+        // --- THREE.js SETUP & PARTICLE FUNCTIONS ---
+
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+            
+            // Camera (Perspective)
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 15;
+            
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // Particles
+            createParticles();
+            
+            // Lighting (Optional, mostly for ambient effect on background)
+            scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+            
+            // Controls & UI
+            setupGUI();
+            setupTemplateSelector();
+
+            // Hand Tracking
+            setupHandTracking();
+            
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            
+            // Start the render loop
+            animate();
+        }
+        
+        function createParticles() {
+            if (particles) scene.remove(particles);
+
+            geometry = new THREE.BufferGeometry();
+            
+            const positions = new Float32Array(CONFIG.particleCount * 3);
+            const templateTargets = new Float32Array(CONFIG.particleCount * 3);
+            const randoms = new Float32Array(CONFIG.particleCount);
+            const templateProgress = new Float32Array(CONFIG.particleCount).fill(1.0); // Start with current template active
+
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                // Initial position (Sphere for generic start)
+                const phi = Math.acos(2 * (i / CONFIG.particleCount) - 1);
+                const theta = Math.sqrt(CONFIG.particleCount * Math.PI) * phi;
+                const r = 5;
+                positions[i * 3 + 0] = r * Math.cos(theta) * Math.sin(phi);
+                positions[i * 3 + 1] = r * Math.sin(theta) * Math.sin(phi);
+                positions[i * 3 + 2] = r * Math.cos(phi);
+                
+                // Initial template target (set to the initial position to prevent immediate movement)
+                templateTargets[i * 3 + 0] = positions[i * 3 + 0];
+                templateTargets[i * 3 + 1] = positions[i * 3 + 1];
+                templateTargets[i * 3 + 2] = positions[i * 3 + 2];
+                
+                // Random value for subtle motion and color variation
+                randoms[i] = Math.random();
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('aTemplateTarget', new THREE.BufferAttribute(templateTargets, 3));
+            geometry.setAttribute('aRandom', new THREE.BufferAttribute(randoms, 1));
+            geometry.setAttribute('aTemplateProgress', new THREE.BufferAttribute(templateProgress, 1));
+
+            // Shader Material Setup
+            uniforms = {
+                uTime: { value: 0.0 },
+                uSize: { value: CONFIG.particleSize },
+                uScale: { value: CONFIG.globalScale },
+                uColor: { value: new THREE.Color(CONFIG.particleColor) },
+                uTexture: { value: createParticleTexture() },
+            };
+
+            material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: document.getElementById('vertexShader').textContent,
+                fragmentShader: document.getElementById('fragmentShader').textContent,
+                transparent: true,
+                depthWrite: false, // For better blending of particles
+                blending: THREE.AdditiveBlending, // Nice glowing effect
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+            
+            // Apply the initial template
+            updateTemplatePositions(CONFIG.currentTemplate);
+        }
+
+        function createParticleTexture() {
+            const size = 64;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const context = canvas.getContext('2d');
+            
+            const gradient = context.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+            gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            gradient.addColorStop(0.2, 'rgba(255, 255, 255, 0.9)');
+            gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, size, size);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            return texture;
+        }
+
+        function updateTemplatePositions(templateKey) {
+            const templateFunction = templates[templateKey];
+            const targetAttribute = geometry.attributes.aTemplateTarget;
+            const targetArray = targetAttribute.array;
+            
+            // Generate the new target positions
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                const pos = templateFunction(i, CONFIG.particleCount);
+                
+                targetArray[i * 3 + 0] = pos.x;
+                targetArray[i * 3 + 1] = pos.y;
+                targetArray[i * 3 + 2] = pos.z;
+            }
+            targetAttribute.needsUpdate = true;
+        }
+        
+        // Template transition logic
+        function setTemplate(templateKey) {
+            if (templateKey === CONFIG.currentTemplate) return;
+            
+            // Update the template targets immediately
+            updateTemplatePositions(templateKey);
+            
+            // Set the template progress to 0 for a fade-in/transition effect
+            const progressAttribute = geometry.attributes.aTemplateProgress;
+            const progressArray = progressAttribute.array;
+            
+            // In a real application, you'd tween this value over time.
+            // For this quick example, we will just set it to 0 and let the shader interpolate
+            // or, we can use the position attribute for the transition.
+            
+            // Simple transition: set progress to 0 (start), update config, and the animate loop will lerp it back to 1
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                progressArray[i] = 0.0;
+            }
+            progressAttribute.needsUpdate = true;
+            
+            CONFIG.currentTemplate = templateKey;
+            
+            // Update UI buttons
+            document.querySelectorAll('.template-button').forEach(btn => {
+                btn.classList.remove('active');
+                if (btn.dataset.template === templateKey) {
+                    btn.classList.add('active');
+                }
+            });
+            
+            if (templateKey === 'fireworks') {
+                CONFIG.fireworksActive = true;
+            }
+        }
+
+
+        // --- ANIMATION LOOP ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const elapsedTime = clock.getElapsedTime();
+            const deltaTime = clock.getDelta();
+
+            // Update Uniforms
+            uniforms.uTime.value = elapsedTime;
+            uniforms.uScale.value = CONFIG.globalScale * CONFIG.spread;
+            uniforms.uSize.value = CONFIG.particleSize;
+
+            // Update Rotation
+            particles.rotation.y = CONFIG.rotationY;
+            
+            // Update Particle Attributes (Template Transition & Physics)
+            const positionAttribute = geometry.attributes.position;
+            const targetAttribute = geometry.attributes.aTemplateTarget;
+            const progressAttribute = geometry.attributes.aTemplateProgress;
+            const positionArray = positionAttribute.array;
+            const targetArray = targetAttribute.array;
+            const progressArray = progressAttribute.array;
+            
+            const lerpFactor = 0.05; // Smooth transition speed
+            
+            for (let i = 0; i < CONFIG.particleCount; i++) {
+                // Lerp current position towards template target position for smooth shape change
+                for (let j = 0; j < 3; j++) {
+                    positionArray[i * 3 + j] = THREE.MathUtils.lerp(
+                        positionArray[i * 3 + j],
+                        targetArray[i * 3 + j] * CONFIG.spread, // Apply spread based on gesture
+                        lerpFactor * 2.0
+                    );
+                }
+                
+                // Lerp the progress attribute for the smooth fade-in/out effect (used in fragment shader)
+                progressArray[i] = THREE.MathUtils.lerp(progressArray[i], 1.0, lerpFactor * 1.5);
+                
+                // --- Fireworks Effect (Simple Burst) ---
+                if (CONFIG.fireworksActive && CONFIG.currentTemplate === 'fireworks') {
+                    // For fireworks, the target is the burst position, and the position is the current velocity/position
+                    
+                    // Simple radial explosion: Initial position is center, then randomized velocity
+                    if (progressArray[i] < 0.1) {
+                         // Assign initial random velocity/direction on burst
+                         const velX = (Math.random() - 0.5) * 20;
+                         const velY = (Math.random() - 0.5) * 20;
+                         const velZ = (Math.random() - 0.5) * 20;
+                         // Store velocity in the 'position' attribute temporarily for the physics step
+                         positionArray[i * 3 + 0] = velX;
+                         positionArray[i * 3 + 1] = velY;
+                         positionArray[i * 3 + 2] = velZ;
+                         // Start the particle at the origin for the visual burst
+                         targetArray[i * 3 + 0] = 0;
+                         targetArray[i * 3 + 1] = 0;
+                         targetArray[i * 3 + 2] = 0;
+                         
+                    } else {
+                        // Apply gravity and drag (damping)
+                        positionArray[i * 3 + 1] += (-9.8 * deltaTime) * 0.1; // Simple gravity
+                        
+                        // Apply drag/dampening
+                        for (let j = 0; j < 3; j++) {
+                           positionArray[i * 3 + j] *= (1.0 - 0.01 * deltaTime * 60); // Dampen velocity
+                        }
+                        
+                        // Update the target array (which is used as the current position in the shader)
+                        // This moves the particles outward based on the 'velocity' stored in the position array
+                        targetArray[i * 3 + 0] += positionArray[i * 3 + 0] * deltaTime * 0.5;
+                        targetArray[i * 3 + 1] += positionArray[i * 3 + 1] * deltaTime * 0.5;
+                        targetArray[i * 3 + 2] += positionArray[i * 3 + 2] * deltaTime * 0.5;
+                    }
+                }
+            }
+
+            positionAttribute.needsUpdate = true;
+            targetAttribute.needsUpdate = true;
+            progressAttribute.needsUpdate = true;
+            
+            // Auto-turn off fireworks after a short burst/duration
+            if (CONFIG.currentTemplate === 'fireworks' && elapsedTime > 5.0 && CONFIG.fireworksActive) {
+                CONFIG.fireworksActive = false;
+                // Transition back to the heart template, for example
+                setTemplate('heart'); 
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- UI and Controls ---
+        
+        function setupGUI() {
+            const gui = new dat.GUI({ autoPlace: false });
+            
+            // Custom placement for a minimal look
+            gui.domElement.style.position = 'fixed';
+            gui.domElement.style.top = '20px';
+            gui.domElement.style.left = '20px';
+            gui.domElement.style.background = 'rgba(255, 255, 255, 0.1)';
+            gui.domElement.style.borderRadius = '12px';
+            gui.domElement.style.backdropFilter = 'blur(5px)';
+
+            // Particle Controls Folder
+            const particleFolder = gui.addFolder('Particle & Color');
+            particleFolder.addColor(CONFIG, 'particleColor').onChange(value => {
+                uniforms.uColor.value.set(value);
+            });
+            particleFolder.add(CONFIG, 'particleSize', 1, 50).step(1).name('Particle Size').onChange(value => {
+                uniforms.uSize.value = value;
+            });
+            particleFolder.add(CONFIG, 'spread', 0.5, 5.0).step(0.1).name('Spread (Manual)').listen(); // Listen for gesture changes
+            particleFolder.add(CONFIG, 'globalScale', 0.1, 3.0).step(0.01).name('Global Scale (Manual)').listen();
+            particleFolder.add(CONFIG, 'rotationY', -Math.PI, Math.PI).step(0.01).name('Spin Y (Manual)').listen();
+            particleFolder.open();
+            
+            // Performance/Gesture Folder
+            const gestureFolder = gui.addFolder('Performance & Gesture');
+            gestureFolder.add(CONFIG, 'particleCount', [5000, 10000, 20000, 50000]).name('Particle Count').onChange(() => {
+                // Must recreate the entire geometry/system to change count
+                createParticles();
+            });
+            gestureFolder.add(CONFIG, 'gestureSensitivity', 0.01, 0.2).step(0.01).name('Gesture Sensitivity');
+            gestureFolder.open();
+        }
+        
+        function setupTemplateSelector() {
+            const selector = document.getElementById('template-selector');
+            selector.addEventListener('click', (event) => {
+                if (event.target.classList.contains('template-button')) {
+                    const templateKey = event.target.dataset.template;
+                    setTemplate(templateKey);
+                }
+            });
+            // Set initial active template
+            document.querySelector(`.template-button[data-template="${CONFIG.currentTemplate}"]`).classList.add('active');
+        }
+
+        // --- Initialization ---
+        init();
+    </script>
+</body>
+</html>
